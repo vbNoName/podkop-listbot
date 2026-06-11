@@ -54,41 +54,77 @@ is_valid_domain() {
 }
 
 process_entries() {
-    local chat_id="$1" text_file="$2"
-    local domains_added=0 ips_added=0 skipped=0 line
+    local chat_id="$1" text_file="$2" mode="${3:-add}"
+    local domains_done=0 ips_done=0 skipped=0 line file tmp
 
     mkdir -p "$(dirname "$DOMAINS_FILE")" "$(dirname "$IPS_FILE")" 2>/dev/null
-    touch "$DOMAINS_FILE" "$IPS_FILE"
+    [ "$mode" = "add" ] && touch "$DOMAINS_FILE" "$IPS_FILE"
 
     while IFS= read -r line || [ -n "$line" ]; do
         line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         [ -z "$line" ] && continue
 
         if is_valid_ipv4 "$line"; then
-            if ! grep -qxF "$line" "$IPS_FILE" 2>/dev/null; then
-                printf '%s\n' "$line" >> "$IPS_FILE"
-                ips_added=$((ips_added + 1))
-            fi
+            file="$IPS_FILE"
         elif is_valid_domain "$line"; then
-            if ! grep -qxF "$line" "$DOMAINS_FILE" 2>/dev/null; then
-                printf '%s\n' "$line" >> "$DOMAINS_FILE"
-                domains_added=$((domains_added + 1))
-            fi
+            file="$DOMAINS_FILE"
         else
             skipped=$((skipped + 1))
+            continue
         fi
+
+        case "$mode" in
+            add)
+                if ! grep -qxF "$line" "$file" 2>/dev/null; then
+                    printf '%s\n' "$line" >> "$file"
+                    [ "$file" = "$IPS_FILE" ] \
+                        && ips_done=$((ips_done + 1)) \
+                        || domains_done=$((domains_done + 1))
+                fi
+                ;;
+            delete)
+                if grep -qxF "$line" "$file" 2>/dev/null; then
+                    tmp=$(mktemp /tmp/tgbot_tmp.XXXXXX)
+                    grep -vxF "$line" "$file" > "$tmp" && mv "$tmp" "$file" || rm -f "$tmp"
+                    [ "$file" = "$IPS_FILE" ] \
+                        && ips_done=$((ips_done + 1)) \
+                        || domains_done=$((domains_done + 1))
+                else
+                    skipped=$((skipped + 1))
+                fi
+                ;;
+            comment)
+                if grep -qxF "$line" "$file" 2>/dev/null; then
+                    tmp=$(mktemp /tmp/tgbot_tmp.XXXXXX)
+                    awk -v pat="$line" '$0 == pat { print "// " $0; next } 1' "$file" > "$tmp" \
+                        && mv "$tmp" "$file" || rm -f "$tmp"
+                    [ "$file" = "$IPS_FILE" ] \
+                        && ips_done=$((ips_done + 1)) \
+                        || domains_done=$((domains_done + 1))
+                else
+                    skipped=$((skipped + 1))
+                fi
+                ;;
+        esac
     done < "$text_file"
 
-    local reply="Done:
-+ Domains: ${domains_added}
-+ IPs: ${ips_added}"
+    local action_label
+    case "$mode" in
+        add)     action_label="Added" ;;
+        delete)  action_label="Deleted" ;;
+        comment) action_label="Commented out" ;;
+    esac
+
+    local reply="${action_label}:
++ Domains: ${domains_done}
++ IPs: ${ips_done}"
     [ "$skipped" -gt 0 ] && reply="${reply}
-? Skipped (invalid): ${skipped}"
+? Skipped (not found or invalid): ${skipped}"
 
     send_message "$chat_id" "$reply"
-    log "Processed: domains+$domains_added ips+$ips_added skip=$skipped"
+    log "${action_label}: domains+$domains_done ips+$ips_done skip=$skipped"
 
-    if [ $((domains_added + ips_added)) -gt 0 ]; then
+    if [ $((domains_done + ips_done)) -gt 0 ]; then
         log "Restarting podkop"
         /etc/init.d/podkop restart >/dev/null 2>&1 || true
     fi
@@ -96,7 +132,7 @@ process_entries() {
 
 handle_update() {
     local response="$1" idx="$2"
-    local update_id chat_id text tmp
+    local update_id chat_id text tmp body
 
     update_id=$(echo "$response" | jsonfilter -e "@.result[${idx}].update_id" 2>/dev/null)
     [ -z "$update_id" ] || [ "$update_id" = "null" ] && return 1
@@ -120,7 +156,33 @@ handle_update() {
         /start*)
             send_message "$chat_id" "Your Telegram ID: ${chat_id}
 
-Send me IP addresses and/or domain names (one per line) and I will add them to podkop custom lists."
+Send IP addresses and/or domain names (one per line) to add them to podkop.
+
+Commands:
+/add — add entries (default, works without the command)
+/delete — remove entries
+/comment — comment out entries"
+            ;;
+        /add*)
+            body=$(printf '%s' "$text" | sed 's|^/add[[:space:]]*||')
+            tmp=$(mktemp /tmp/tgbot_msg.XXXXXX)
+            printf '%s' "$body" > "$tmp"
+            process_entries "$chat_id" "$tmp" "add"
+            rm -f "$tmp"
+            ;;
+        /delete*)
+            body=$(printf '%s' "$text" | sed 's|^/delete[[:space:]]*||')
+            tmp=$(mktemp /tmp/tgbot_msg.XXXXXX)
+            printf '%s' "$body" > "$tmp"
+            process_entries "$chat_id" "$tmp" "delete"
+            rm -f "$tmp"
+            ;;
+        /comment*)
+            body=$(printf '%s' "$text" | sed 's|^/comment[[:space:]]*||')
+            tmp=$(mktemp /tmp/tgbot_msg.XXXXXX)
+            printf '%s' "$body" > "$tmp"
+            process_entries "$chat_id" "$tmp" "comment"
+            rm -f "$tmp"
             ;;
         /*)
             send_message "$chat_id" "Unknown command. Use /start to get your Telegram ID."
@@ -128,7 +190,7 @@ Send me IP addresses and/or domain names (one per line) and I will add them to p
         *)
             tmp=$(mktemp /tmp/tgbot_msg.XXXXXX)
             printf '%s' "$text" > "$tmp"
-            process_entries "$chat_id" "$tmp"
+            process_entries "$chat_id" "$tmp" "add"
             rm -f "$tmp"
             ;;
     esac
