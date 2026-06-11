@@ -1,0 +1,35 @@
+#!/bin/sh /etc/rc.common
+
+USE_PROCD=1
+START=99
+STOP=10
+
+PROG=/usr/bin/tgbot.sh
+
+start_service() {
+    local token
+    config_load tgbot
+    config_get token main token ""
+
+    [ -z "$token" ] && {
+        echo "tgbot: no token configured, not starting"
+        return 1
+    }
+
+    procd_open_instance
+    procd_set_param command "$PROG"
+    procd_set_param respawn 3600 5 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param file /etc/config/tgbot
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger "tgbot"
+}
+
+reload_service() {
+    stop
+    start
+}
