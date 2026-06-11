@@ -1,4 +1,4 @@
-# luci-app-podkop-tgbot
+# Podkop Listbot
 
 Telegram-бот для управления пользовательскими списками [podkop](https://github.com/itdoginfo/podkop) на роутерах с OpenWrt и FriendlyWrt.
 
