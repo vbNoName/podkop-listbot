@@ -126,7 +126,7 @@ process_entries() {
             delete)
                 if grep -qxF "$line" "$file" 2>/dev/null; then
                     tmp=$(mktemp /tmp/tgbot_tmp.XXXXXX)
-                    grep -vxF "$line" "$file" > "$tmp" && mv "$tmp" "$file" || rm -f "$tmp"
+                    grep -vxF "$line" "$file" > "$tmp"; mv "$tmp" "$file"
                     [ "$file" = "$IPS_FILE" ] \
                         && ips_done=$((ips_done + 1)) \
                         || domains_done=$((domains_done + 1))
