@@ -31,6 +31,20 @@ is_allowed() {
     return 1
 }
 
+get_mode() {
+    local mode_file="/tmp/tgbot_mode_$1"
+    [ -f "$mode_file" ] && cat "$mode_file" || echo "add"
+}
+
+set_mode() {
+    local mode_file="/tmp/tgbot_mode_$1"
+    if [ "$2" = "add" ]; then
+        rm -f "$mode_file"
+    else
+        printf '%s' "$2" > "$mode_file"
+    fi
+}
+
 send_message() {
     local chat_id="$1" text="$2" tmp
     tmp=$(mktemp /tmp/tgbot_send.XXXXXX)
@@ -41,6 +55,33 @@ send_message() {
         -F "text=<${tmp}" \
         -o /dev/null 2>/dev/null
     rm -f "$tmp"
+}
+
+send_list() {
+    local chat_id="$1" domains_content ips_content reply
+
+    if [ -f "$DOMAINS_FILE" ] && [ -s "$DOMAINS_FILE" ]; then
+        domains_content=$(cat "$DOMAINS_FILE")
+    else
+        domains_content="(пусто)"
+    fi
+
+    if [ -f "$IPS_FILE" ] && [ -s "$IPS_FILE" ]; then
+        ips_content=$(cat "$IPS_FILE")
+    else
+        ips_content="(пусто)"
+    fi
+
+    reply="Домены:
+${domains_content}
+
+IP-адреса:
+${ips_content}"
+
+    # stay within Telegram's 4096-char message limit
+    reply=$(printf '%s' "$reply" | head -c 3900)
+
+    send_message "$chat_id" "$reply"
 }
 
 is_valid_ipv4() {
@@ -110,16 +151,16 @@ process_entries() {
 
     local action_label
     case "$mode" in
-        add)     action_label="Added" ;;
-        delete)  action_label="Deleted" ;;
-        comment) action_label="Commented out" ;;
+        add)     action_label="Добавлено" ;;
+        delete)  action_label="Удалено" ;;
+        comment) action_label="Закомментировано" ;;
     esac
 
     local reply="${action_label}:
-+ Domains: ${domains_done}
-+ IPs: ${ips_done}"
++ Доменов: ${domains_done}
++ IP: ${ips_done}"
     [ "$skipped" -gt 0 ] && reply="${reply}
-? Skipped (not found or invalid): ${skipped}"
+? Пропущено (не найдено или неверный формат): ${skipped}"
 
     send_message "$chat_id" "$reply"
     log "${action_label}: domains+$domains_done ips+$ips_done skip=$skipped"
@@ -132,7 +173,7 @@ process_entries() {
 
 handle_update() {
     local response="$1" idx="$2"
-    local update_id chat_id text tmp body
+    local update_id chat_id text tmp body active_mode
 
     update_id=$(echo "$response" | jsonfilter -e "@.result[${idx}].update_id" 2>/dev/null)
     [ -z "$update_id" ] || [ "$update_id" = "null" ] && return 1
@@ -148,49 +189,70 @@ handle_update() {
 
     if ! is_allowed "$chat_id"; then
         log "Rejected message from chat_id=$chat_id"
-        send_message "$chat_id" "Access denied. Your Telegram ID: ${chat_id}"
+        send_message "$chat_id" "Доступ запрещён. Ваш Telegram ID: ${chat_id}"
         return 0
     fi
 
     case "$text" in
         /start*)
-            send_message "$chat_id" "Your Telegram ID: ${chat_id}
+            send_message "$chat_id" "Ваш Telegram ID: ${chat_id}
 
-Send IP addresses and/or domain names (one per line) to add them to podkop.
+Отправьте IP-адреса и/или домены (каждый с новой строки) — они добавятся в списки podkop.
 
-Commands:
-/add — add entries (default, works without the command)
-/delete — remove entries
-/comment — comment out entries"
+Команды:
+/add — добавить записи (режим по умолчанию, работает без команды)
+/delete — удалить записи
+/comment — закомментировать записи
+/list — показать текущие списки"
+            ;;
+        /list*)
+            send_list "$chat_id"
             ;;
         /add*)
             body=$(printf '%s' "$text" | sed 's|^/add[[:space:]]*||')
-            tmp=$(mktemp /tmp/tgbot_msg.XXXXXX)
-            printf '%s' "$body" > "$tmp"
-            process_entries "$chat_id" "$tmp" "add"
-            rm -f "$tmp"
+            if [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+                set_mode "$chat_id" "add"
+                send_message "$chat_id" "Режим добавления. Отправьте записи."
+            else
+                tmp=$(mktemp /tmp/tgbot_msg.XXXXXX)
+                printf '%s' "$body" > "$tmp"
+                process_entries "$chat_id" "$tmp" "add"
+                rm -f "$tmp"
+            fi
             ;;
         /delete*)
             body=$(printf '%s' "$text" | sed 's|^/delete[[:space:]]*||')
-            tmp=$(mktemp /tmp/tgbot_msg.XXXXXX)
-            printf '%s' "$body" > "$tmp"
-            process_entries "$chat_id" "$tmp" "delete"
-            rm -f "$tmp"
+            if [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+                set_mode "$chat_id" "delete"
+                send_message "$chat_id" "Режим удаления. Отправьте записи для удаления."
+            else
+                tmp=$(mktemp /tmp/tgbot_msg.XXXXXX)
+                printf '%s' "$body" > "$tmp"
+                process_entries "$chat_id" "$tmp" "delete"
+                rm -f "$tmp"
+            fi
             ;;
         /comment*)
             body=$(printf '%s' "$text" | sed 's|^/comment[[:space:]]*||')
-            tmp=$(mktemp /tmp/tgbot_msg.XXXXXX)
-            printf '%s' "$body" > "$tmp"
-            process_entries "$chat_id" "$tmp" "comment"
-            rm -f "$tmp"
+            if [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+                set_mode "$chat_id" "comment"
+                send_message "$chat_id" "Режим комментирования. Отправьте записи для закомментирования."
+            else
+                tmp=$(mktemp /tmp/tgbot_msg.XXXXXX)
+                printf '%s' "$body" > "$tmp"
+                process_entries "$chat_id" "$tmp" "comment"
+                rm -f "$tmp"
+            fi
             ;;
         /*)
-            send_message "$chat_id" "Unknown command. Use /start to get your Telegram ID."
+            send_message "$chat_id" "Неизвестная команда. Используйте /start, чтобы узнать свой Telegram ID."
             ;;
         *)
+            active_mode=$(get_mode "$chat_id")
+            set_mode "$chat_id" "add"
             tmp=$(mktemp /tmp/tgbot_msg.XXXXXX)
             printf '%s' "$text" > "$tmp"
-            process_entries "$chat_id" "$tmp" "add"
+            process_entries "$chat_id" "$tmp" "$active_mode"
             rm -f "$tmp"
             ;;
     esac
